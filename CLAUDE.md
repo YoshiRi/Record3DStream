@@ -8,7 +8,7 @@ This repo is a **sensor driver** for iPhone LiDAR/RGBD/IMU. Downstream consumers
 
 Discovered by codebase audit. Implemented in order: SDK → ROS2 driver.
 
-### Commit 1 — SDK: queue-based delivery + packet validation [DONE]
+### Commit 1 — SDK: queue-based delivery + packet validation ✅ 683db25
 
 **Files**: `sdk/sdk/client.py`, `sdk/sdk/protocol.py`
 
@@ -18,7 +18,7 @@ Discovered by codebase audit. Implemented in order: SDK → ROS2 driver.
 | 1b | No frame statistics (FPS, drop rate) | Add `get_stats()` → `{frames_received, frames_dropped, fps, drop_rate}` |
 | 1c | Corrupt packet header can claim arbitrarily large sizes, causing OOM spin | Add bounds check in `get_packet_size()` and `parse_frame()` before size calculation |
 
-### Commit 2 — ROS2: correct timestamps + event-driven receive [DONE]
+### Commit 2 — ROS2: correct timestamps + event-driven receive ✅ 005a337
 
 **Files**: `ros2-driver/ros2_driver/iphone_sensor_node.py`
 
@@ -28,7 +28,7 @@ Discovered by codebase audit. Implemented in order: SDK → ROS2 driver.
 | 2b | `self.get_clock().now()` timestamps all messages at *publish* time, not *capture* time | Establish ARKit→ROS2 time offset at first frame; use `frame.timestamp` for all headers |
 | 2c | IMU stamp uses publish time; breaks IMU preintegration in SLAM | Use `frame.imu.timestamp` (ARKit monotonic) with the same offset for IMU header |
 
-### Commit 3 — ROS2: heavy processing off the receive path [DONE]
+### Commit 3 — ROS2: heavy processing off the receive path ✅ 005a337 (same commit as #2)
 
 **Files**: `ros2-driver/ros2_driver/iphone_sensor_node.py`
 
