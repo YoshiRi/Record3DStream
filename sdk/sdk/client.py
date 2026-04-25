@@ -49,6 +49,7 @@ class IPhoneSensorClient:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._buffer = bytearray()
+        self._buf_pos: int = 0  # read head; trimmed periodically to bound memory
 
         # Queue-based frame delivery: drop oldest when full so consumers always
         # get the most recent data. maxsize=2 absorbs one-frame bursts.
@@ -84,6 +85,14 @@ class IPhoneSensorClient:
         if self._running:
             return True
 
+        # Clean up any leftover socket from a previous connection attempt
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+            self._socket = None
+
         # Start USB tunnel if needed
         if self._iproxy is not None:
             try:
@@ -114,12 +123,13 @@ class IPhoneSensorClient:
 
     def stop(self):
         """Disconnect from server."""
+        was_running = self._running
         self._running = False
 
         if self._socket:
             try:
                 self._socket.close()
-            except:
+            except Exception:
                 pass
 
         if self._thread and self._thread.is_alive():
@@ -131,7 +141,8 @@ class IPhoneSensorClient:
         if self._iproxy is not None:
             self._iproxy.stop()
 
-        print("Disconnected")
+        if was_running:
+            print("Disconnected")
 
     def wait_for_frame(self, timeout: float = 1.0) -> Optional[Frame]:
         """Block until the next frame is available and return it.
@@ -204,7 +215,6 @@ class IPhoneSensorClient:
         """Background thread for receiving data."""
         while self._running:
             try:
-                # Receive data
                 data = self._socket.recv(524288)
                 if not data:
                     print("Connection closed by server")
@@ -212,30 +222,38 @@ class IPhoneSensorClient:
 
                 self._buffer.extend(data)
 
-                # Try to parse complete frames
                 while True:
-                    if len(self._buffer) < HEADER_SIZE:
+                    buf_len = len(self._buffer) - self._buf_pos
+                    if buf_len < HEADER_SIZE:
                         break
 
-                    # Need enough bytes to parse header (v2 needs 48 bytes)
-                    hdr_read_size = min(HEADER_SIZE_V2, len(self._buffer))
-                    packet_size = get_packet_size(bytes(self._buffer[:hdr_read_size]))
+                    hdr_read_size = min(HEADER_SIZE_V2, buf_len)
+                    hdr_bytes = bytes(self._buffer[self._buf_pos:self._buf_pos + hdr_read_size])
+                    packet_size = get_packet_size(hdr_bytes)
                     if packet_size is None:
-                        # Invalid header, try to find magic
-                        magic_pos = self._buffer.find(b"REC3D")
-                        if magic_pos > 0:
-                            self._buffer = self._buffer[magic_pos:]
+                        # Invalid/corrupt header — resync to next magic bytes
+                        magic_pos = self._buffer.find(b"REC3D", self._buf_pos)
+                        if magic_pos > self._buf_pos:
+                            self._buf_pos = magic_pos
+                            continue  # try parsing immediately from new position
                         elif magic_pos < 0:
-                            self._buffer = self._buffer[-4:]
+                            # Keep last 4 bytes: "REC3D" may span the next recv()
+                            self._buf_pos = max(self._buf_pos, len(self._buffer) - 4)
+                        else:
+                            # At magic but sizes are invalid — skip past it
+                            self._buf_pos += 1
                         break
 
-                    # Check if we have complete packet
-                    if len(self._buffer) < packet_size:
-                        break
+                    if buf_len < packet_size:
+                        break  # wait for the rest of the packet
 
-                    # Parse frame
-                    packet_data = bytes(self._buffer[:packet_size])
-                    self._buffer = self._buffer[packet_size:]
+                    packet_data = bytes(self._buffer[self._buf_pos:self._buf_pos + packet_size])
+                    self._buf_pos += packet_size
+
+                    # Trim consumed bytes periodically to bound memory
+                    if self._buf_pos > 65536:
+                        del self._buffer[:self._buf_pos]
+                        self._buf_pos = 0
 
                     frame = parse_frame(packet_data)
                     if frame:
@@ -254,6 +272,7 @@ class IPhoneSensorClient:
         """Clean up resources."""
         self._socket = None
         self._buffer.clear()
+        self._buf_pos = 0
         while True:
             try:
                 self._queue.get_nowait()
