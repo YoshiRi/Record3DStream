@@ -9,6 +9,7 @@ import queue as _queue
 import sys
 import math
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -46,6 +47,11 @@ class IPhoneSensorNode(Node):
         self.declare_parameter("depth_range_min", 0.1)
         self.declare_parameter("depth_range_max", 5.0)
         self.declare_parameter("min_confidence", 1)
+        self.declare_parameter("temporal_alpha", 0.4)
+        self.declare_parameter("temporal_delta", 0.04)
+        self.declare_parameter("bilateral_d", 5)
+        self.declare_parameter("bilateral_sigma_color", 0.04)
+        self.declare_parameter("bilateral_sigma_space", 4.5)
 
         self.host = self.get_parameter("host").value
         self.port = self.get_parameter("port").value
@@ -123,9 +129,12 @@ class IPhoneSensorNode(Node):
         self._frame_count = 0
         self._log_interval = 30
 
-        # Depth filter parameters (tune to trade stability vs responsiveness)
-        self._temporal_alpha = 0.4   # EMA weight of current frame (lower = smoother)
-        self._temporal_delta = 0.04  # Reset threshold in metres (preserves fast motion)
+        # Depth filter parameters (exposed as ROS2 parameters for runtime tuning)
+        self._temporal_alpha = self.get_parameter("temporal_alpha").value
+        self._temporal_delta = self.get_parameter("temporal_delta").value
+        self._bilateral_d = self.get_parameter("bilateral_d").value
+        self._bilateral_sigma_color = self.get_parameter("bilateral_sigma_color").value
+        self._bilateral_sigma_space = self.get_parameter("bilateral_sigma_space").value
 
         # ARKit → ROS2 time offset, established at the first received frame.
         # frame.timestamp is CACurrentMediaTime() (monotonic, seconds from an
@@ -168,8 +177,10 @@ class IPhoneSensorNode(Node):
             frame = self.client.wait_for_frame(timeout=1.0)
             if frame is None:
                 if not self.client.is_connected:
-                    self.get_logger().error("Disconnected from iPhone!")
-                    break
+                    self.get_logger().warn("Disconnected from iPhone, attempting reconnect...")
+                    if not self._reconnect():
+                        self.get_logger().error("Reconnect failed — shutting down node.")
+                        break
                 continue
 
             # Establish the ARKit→ROS2 offset at the first frame.
@@ -178,6 +189,24 @@ class IPhoneSensorNode(Node):
                 self._time_offset_ns = ros2_ns - int(frame.timestamp * 1e9)
 
             self._process_frame(frame)
+
+    def _reconnect(self) -> bool:
+        """Retry connecting with exponential back-off until success or shutdown."""
+        delay = 2.0
+        attempt = 0
+        while self._node_running and rclpy.ok():
+            attempt += 1
+            self.get_logger().info(f"Reconnect attempt {attempt}, waiting {delay:.0f}s...")
+            time.sleep(delay)
+            if not self._node_running:
+                return False
+            if self.client.start():
+                # Reset time offset so the new session gets a fresh baseline.
+                self._time_offset_ns = None
+                self.get_logger().info("Reconnected!")
+                return True
+            delay = min(delay * 2, 30.0)
+        return False
 
     # ------------------------------------------------------------------
     # Per-frame processing (time-critical path: color, depth, IMU, scan)
@@ -315,7 +344,11 @@ class IPhoneSensorNode(Node):
             depth_header = task["depth_header"]
 
             # 1) Bilateral filter: smooth spatial noise, preserve real edges.
-            depth = cv2.bilateralFilter(depth, d=5, sigmaColor=0.04, sigmaSpace=4.5)
+            depth = cv2.bilateralFilter(
+                depth, d=self._bilateral_d,
+                sigmaColor=self._bilateral_sigma_color,
+                sigmaSpace=self._bilateral_sigma_space,
+            )
 
             # 2) Temporal EMA: reduce per-frame LiDAR jitter (~5-20mm).
             #    Resets at depth discontinuities so real motion responds instantly.
@@ -456,16 +489,13 @@ class IPhoneSensorNode(Node):
         if n_points == 0:
             return None
 
-        points = np.zeros(n_points, dtype=[
-            ("x", np.float32),
-            ("y", np.float32),
-            ("z", np.float32),
-            ("rgb", np.float32),
-        ])
-        points["x"] = x
-        points["y"] = y
-        points["z"] = z
-        points["rgb"] = rgb_float
+        # Single allocation: (N, 4) float32 → same wire layout as the structured
+        # dtype approach but without per-field copy overhead.
+        pc_data = np.empty((n_points, 4), dtype=np.float32)
+        pc_data[:, 0] = x
+        pc_data[:, 1] = y
+        pc_data[:, 2] = z
+        pc_data[:, 3] = rgb_float
 
         msg = PointCloud2()
         msg.header = header
@@ -480,7 +510,7 @@ class IPhoneSensorNode(Node):
         msg.is_bigendian = False
         msg.point_step = 16
         msg.row_step = 16 * n_points
-        msg.data = points.tobytes()
+        msg.data = pc_data.tobytes()
         msg.is_dense = True
         return msg
 
