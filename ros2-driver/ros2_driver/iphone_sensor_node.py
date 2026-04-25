@@ -7,7 +7,6 @@ and camera info topics. Broadcasts TF frames.
 
 import queue as _queue
 import sys
-import struct
 import math
 import threading
 from typing import Optional
@@ -259,7 +258,9 @@ class IPhoneSensorNode(Node):
             imu_msg.angular_velocity.x = float(frame.imu.gyro[0])
             imu_msg.angular_velocity.y = float(-frame.imu.gyro[2])
             imu_msg.angular_velocity.z = float(frame.imu.gyro[1])
-            imu_msg.orientation_covariance[0] = -1.0  # orientation unknown
+            imu_msg.orientation_covariance[0] = -1.0           # orientation unknown
+            imu_msg.linear_acceleration_covariance[0] = -1.0   # magnitude unknown
+            imu_msg.angular_velocity_covariance[0] = -1.0      # magnitude unknown
             self.pub_imu.publish(imu_msg)
 
         # --- Publish LaserScan ---
@@ -268,6 +269,9 @@ class IPhoneSensorNode(Node):
             scan_msg = self._make_laserscan(frame.depth, depth_intr, laser_header)
             if scan_msg is not None:
                 self.pub_scan.publish(scan_msg)
+
+        # --- Broadcast ARKit pose as TF: world -> camera_link ---
+        self._broadcast_pose(frame.transform, stamp)
 
         # --- Submit heavy work (non-blocking; drop if worker is busy) ---
         try:
