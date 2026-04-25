@@ -43,6 +43,7 @@ class IPhoneSensorNode(Node):
         self.declare_parameter("publish_confidence", True)
         self.declare_parameter("publish_imu", True)
         self.declare_parameter("publish_scan", True)
+        self.declare_parameter("publish_filtered_scan", False)
         self.declare_parameter("usb", False)
         self.declare_parameter("depth_range_min", 0.1)
         self.declare_parameter("depth_range_max", 5.0)
@@ -62,6 +63,7 @@ class IPhoneSensorNode(Node):
         self.pub_conf_enabled = self.get_parameter("publish_confidence").value
         self.pub_imu_enabled = self.get_parameter("publish_imu").value
         self.pub_scan_enabled = self.get_parameter("publish_scan").value
+        self.pub_filtered_scan_enabled = self.get_parameter("publish_filtered_scan").value
         self.depth_min = self.get_parameter("depth_range_min").value
         self.depth_max = self.get_parameter("depth_range_max").value
         self.min_confidence = self.get_parameter("min_confidence").value
@@ -102,6 +104,9 @@ class IPhoneSensorNode(Node):
 
         if self.pub_scan_enabled:
             self.pub_scan = self.create_publisher(LaserScan, "scan", sensor_qos)
+
+        if self.pub_filtered_scan_enabled:
+            self.pub_filtered_scan = self.create_publisher(LaserScan, "scan_filtered", sensor_qos)
 
         # TF broadcasters
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -386,6 +391,13 @@ class IPhoneSensorNode(Node):
                 pc_msg = self._make_pointcloud(depth, valid_mask, color, depth_intr, depth_header)
                 if pc_msg is not None:
                     self.pub_pointcloud.publish(pc_msg)
+
+            # Publish filtered LaserScan (bilateral + EMA + erosion applied)
+            if self.pub_filtered_scan_enabled:
+                laser_header = Header(stamp=depth_header.stamp, frame_id=self.laser_frame)
+                scan_msg = self._make_laserscan(depth, depth_intr, laser_header)
+                if scan_msg is not None:
+                    self.pub_filtered_scan.publish(scan_msg)
 
     # ------------------------------------------------------------------
     # Message builders

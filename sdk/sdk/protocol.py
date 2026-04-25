@@ -37,7 +37,7 @@ Protocol v2 format (little-endian):
 import struct
 import numpy as np
 import cv2
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from .frame import Frame, Intrinsics, IMUData
 
@@ -126,21 +126,23 @@ def _sizes_valid(header: dict) -> bool:
     )
 
 
-def parse_frame(data: bytes) -> Optional[Frame]:
+def parse_frame(data: bytes, _header: Optional[Dict] = None) -> Optional[Frame]:
     """Parse a complete frame packet (v1 or v2).
 
     Args:
         data: Raw packet bytes
+        _header: Pre-parsed header dict from get_packet_info(); skips re-parsing
+                 when the caller already validated the header to get packet_size.
 
     Returns:
         Frame object or None if parsing fails.
     """
-    header = parse_header(data)
-    if header is None:
-        return None
-
-    if not _sizes_valid(header):
-        return None
+    if _header is not None:
+        header = _header
+    else:
+        header = parse_header(data)
+        if header is None or not _sizes_valid(header):
+            return None
 
     version = header["version"]
     hdr_size = _header_size(version)
@@ -223,6 +225,25 @@ def parse_frame(data: bytes) -> Optional[Frame]:
         confidence=confidence,
         imu=imu
     )
+
+
+def get_packet_info(data: bytes) -> Tuple[Optional[int], Optional[Dict]]:
+    """Parse header and return (packet_size, header_dict) in one pass.
+
+    Avoids re-parsing the header inside parse_frame() when the caller already
+    needs the packet size to decide whether enough bytes have arrived.
+
+    Returns:
+        (packet_size, header) if valid, (None, None) otherwise.
+    """
+    header = parse_header(data)
+    if header is None or not _sizes_valid(header):
+        return None, None
+    hdr_size = _header_size(header["version"])
+    size = (hdr_size + INTRINSICS_SIZE + TRANSFORM_SIZE
+            + header["depth_size"] + header["rgb_size"]
+            + header["confidence_size"] + header["imu_size"])
+    return size, header
 
 
 def get_packet_size(data: bytes) -> Optional[int]:
