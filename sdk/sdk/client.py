@@ -22,7 +22,7 @@ import time
 from typing import Dict, Optional
 
 from .frame import Frame
-from .protocol import parse_frame, get_packet_size, HEADER_SIZE, HEADER_SIZE_V2
+from .protocol import parse_frame, get_packet_info, HEADER_SIZE, HEADER_SIZE_V2
 from .usb import IProxyManager
 
 
@@ -185,11 +185,16 @@ class IPhoneSensorClient:
         }
 
     def _put_frame(self, frame: Frame) -> None:
-        """Enqueue a frame, dropping the oldest entry if the queue is full."""
+        """Enqueue a frame, evicting the oldest entry if the queue is full.
+
+        frames_dropped counts evictions (old frames displaced so the newest
+        frame can be stored), not cases where the new frame itself was lost.
+        This makes the drop_rate metric a reliable indicator of consumer lag.
+        """
         try:
             self._queue.put_nowait(frame)
         except _queue.Full:
-            # Discard oldest, make room for newest
+            # Evict oldest to make room for newest
             try:
                 self._queue.get_nowait()
             except _queue.Empty:
@@ -198,7 +203,7 @@ class IPhoneSensorClient:
                 self._queue.put_nowait(frame)
             except _queue.Full:
                 pass
-            self._frames_dropped += 1
+            self._frames_dropped += 1  # one old frame was evicted
 
         self._frames_received += 1
 
@@ -229,7 +234,7 @@ class IPhoneSensorClient:
 
                     hdr_read_size = min(HEADER_SIZE_V2, buf_len)
                     hdr_bytes = bytes(self._buffer[self._buf_pos:self._buf_pos + hdr_read_size])
-                    packet_size = get_packet_size(hdr_bytes)
+                    packet_size, hdr = get_packet_info(hdr_bytes)
                     if packet_size is None:
                         # Invalid/corrupt header — resync to next magic bytes
                         magic_pos = self._buffer.find(b"REC3D", self._buf_pos)
@@ -255,7 +260,7 @@ class IPhoneSensorClient:
                         del self._buffer[:self._buf_pos]
                         self._buf_pos = 0
 
-                    frame = parse_frame(packet_data)
+                    frame = parse_frame(packet_data, _header=hdr)
                     if frame:
                         self._put_frame(frame)
 
