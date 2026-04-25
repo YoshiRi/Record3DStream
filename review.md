@@ -59,11 +59,13 @@ if self._buf_pos > 65536:
 
 ---
 
-### P2: カラー画像の回転（8MB）が受信スレッドをブロックする
+### P2: カラー画像の回転（8MB）が受信スレッドをブロックする ✗ 見送り
 
 **ファイル**: `ros2-driver/ros2_driver/iphone_sensor_node.py:212`
 
-1920×1440×3 ≈ 8MB のカラー回転をcritical pathで実行。デプスは受信スレッドでパブリッシュするため必要だが、カラー回転はheavy workerへ移動できる。
+1920×1440×3 ≈ 8MB のカラー回転をcritical pathで実行している。カラー回転を heavy worker に移すには `pub_color` もそちらへ移す必要がある。
+
+**見送り理由**: `pub_color` を heavy worker に移すとカラーのパブリッシュレートがバイラテラルフィルタのボトルネック（~6fps）に落ちる。SLAM/VIO パイプラインは depth と color を同一 timestamp で同期するため、color が遅延すると同期が壊れる。また OpenCV の ROTATE_90_CLOCKWISE は SIMD 最適化済みで 8MB ≒ 1–2ms 程度であり、33ms フレーム予算に対して十分小さい。タイムスタンプは ARKit 取得時刻を使っているため publish ジッターは精度に影響しない。
 
 ---
 
