@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Packaging / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ROS / colcon
+install/
+log/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime captures
+*_color.jpg
+*_depth.png
+*_transform.npy
