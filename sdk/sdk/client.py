@@ -226,7 +226,7 @@ class IPhoneSensorClient:
                         if magic_pos > 0:
                             self._buffer = self._buffer[magic_pos:]
                         elif magic_pos < 0:
-                            self._buffer.clear()
+                            self._buffer = self._buffer[-4:]
                         break
 
                     # Check if we have complete packet
