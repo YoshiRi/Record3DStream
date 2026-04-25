@@ -15,9 +15,11 @@ Usage:
     client.stop()
 """
 
+import queue as _queue
 import socket
 import threading
-from typing import Optional
+import time
+from typing import Dict, Optional
 
 from .frame import Frame
 from .protocol import parse_frame, get_packet_size, HEADER_SIZE, HEADER_SIZE_V2
@@ -46,10 +48,18 @@ class IPhoneSensorClient:
         self._socket: Optional[socket.socket] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._latest_frame: Optional[Frame] = None
-        self._frame_lock = threading.Lock()
-        self._frame_event = threading.Event()
         self._buffer = bytearray()
+
+        # Queue-based frame delivery: drop oldest when full so consumers always
+        # get the most recent data. maxsize=2 absorbs one-frame bursts.
+        self._queue: _queue.Queue = _queue.Queue(maxsize=2)
+
+        # Frame statistics
+        self._frames_received: int = 0
+        self._frames_dropped: int = 0
+        self._fps_count: int = 0
+        self._fps_ts: float = 0.0
+        self._fps: float = 0.0
 
         # USB tunnel manager
         self._iproxy: Optional[IProxyManager] = None
@@ -88,6 +98,7 @@ class IPhoneSensorClient:
             self._socket.settimeout(self.timeout)
             self._socket.connect((self.host, self.port))
             self._running = True
+            self._fps_ts = time.monotonic()
 
             self._thread = threading.Thread(target=self._receive_loop, daemon=True)
             self._thread.start()
@@ -123,9 +134,7 @@ class IPhoneSensorClient:
         print("Disconnected")
 
     def wait_for_frame(self, timeout: float = 1.0) -> Optional[Frame]:
-        """Wait for and return the latest frame.
-
-        Always returns the most recent frame, never a stale one.
+        """Block until the next frame is available and return it.
 
         Args:
             timeout: Maximum time to wait in seconds
@@ -135,14 +144,10 @@ class IPhoneSensorClient:
         """
         if not self._running:
             return None
-
-        self._frame_event.wait(timeout=timeout)
-        self._frame_event.clear()
-
-        with self._frame_lock:
-            frame = self._latest_frame
-            self._latest_frame = None
-            return frame
+        try:
+            return self._queue.get(timeout=timeout)
+        except _queue.Empty:
+            return None
 
     def get_frame(self) -> Optional[Frame]:
         """Get the latest frame without waiting (non-blocking).
@@ -150,10 +155,50 @@ class IPhoneSensorClient:
         Returns:
             Frame object or None if no frame available.
         """
-        with self._frame_lock:
-            frame = self._latest_frame
-            self._latest_frame = None
-            return frame
+        try:
+            return self._queue.get_nowait()
+        except _queue.Empty:
+            return None
+
+    def get_stats(self) -> Dict:
+        """Return frame delivery statistics.
+
+        Returns:
+            Dict with keys: frames_received, frames_dropped, fps, drop_rate
+        """
+        return {
+            "frames_received": self._frames_received,
+            "frames_dropped": self._frames_dropped,
+            "fps": round(self._fps, 1),
+            "drop_rate": round(self._frames_dropped / max(1, self._frames_received), 3),
+        }
+
+    def _put_frame(self, frame: Frame) -> None:
+        """Enqueue a frame, dropping the oldest entry if the queue is full."""
+        try:
+            self._queue.put_nowait(frame)
+        except _queue.Full:
+            # Discard oldest, make room for newest
+            try:
+                self._queue.get_nowait()
+            except _queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(frame)
+            except _queue.Full:
+                pass
+            self._frames_dropped += 1
+
+        self._frames_received += 1
+
+        # Rolling 1-second FPS estimate
+        now = time.monotonic()
+        self._fps_count += 1
+        elapsed = now - self._fps_ts
+        if elapsed >= 1.0:
+            self._fps = self._fps_count / elapsed
+            self._fps_count = 0
+            self._fps_ts = now
 
     def _receive_loop(self):
         """Background thread for receiving data."""
@@ -194,10 +239,7 @@ class IPhoneSensorClient:
 
                     frame = parse_frame(packet_data)
                     if frame:
-                        # Always keep only the latest frame
-                        with self._frame_lock:
-                            self._latest_frame = frame
-                        self._frame_event.set()
+                        self._put_frame(frame)
 
             except socket.timeout:
                 continue
@@ -212,9 +254,11 @@ class IPhoneSensorClient:
         """Clean up resources."""
         self._socket = None
         self._buffer.clear()
-        with self._frame_lock:
-            self._latest_frame = None
-        self._frame_event.clear()
+        while True:
+            try:
+                self._queue.get_nowait()
+            except _queue.Empty:
+                break
 
 
 # Convenience function

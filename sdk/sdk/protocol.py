@@ -50,6 +50,13 @@ INTRINSICS_SIZE = 36  # 9 floats
 TRANSFORM_SIZE = 64   # 16 floats
 IMU_DATA_SIZE = 56    # 7 x float64
 
+# Upper bounds for packet field sizes — guards against corrupt/malicious headers.
+# Values are generous multiples of the actual iPhone output.
+_MAX_DEPTH_SIZE    = 512 * 512 * 4       # float32, well above 256×192
+_MAX_RGB_SIZE      = 4 * 1024 * 1024     # 4 MB JPEG
+_MAX_CONF_SIZE     = 512 * 512           # uint8, well above 256×192
+_MAX_IMU_SIZE      = 1024                # well above 56 bytes
+
 
 def _get_version(data: bytes) -> Optional[int]:
     """Get protocol version from header data."""
@@ -109,6 +116,16 @@ def _header_size(version: int) -> int:
     return HEADER_SIZE_V2 if version >= 2 else HEADER_SIZE_V1
 
 
+def _sizes_valid(header: dict) -> bool:
+    """Return False if any payload size field exceeds the known maximum."""
+    return (
+        header["depth_size"]      <= _MAX_DEPTH_SIZE and
+        header["rgb_size"]        <= _MAX_RGB_SIZE   and
+        header["confidence_size"] <= _MAX_CONF_SIZE  and
+        header["imu_size"]        <= _MAX_IMU_SIZE
+    )
+
+
 def parse_frame(data: bytes) -> Optional[Frame]:
     """Parse a complete frame packet (v1 or v2).
 
@@ -120,6 +137,9 @@ def parse_frame(data: bytes) -> Optional[Frame]:
     """
     header = parse_header(data)
     if header is None:
+        return None
+
+    if not _sizes_valid(header):
         return None
 
     version = header["version"]
@@ -169,6 +189,10 @@ def parse_frame(data: bytes) -> Optional[Frame]:
     else:
         rgb_height, rgb_width = color.shape[:2]
 
+    # Validate decoded JPEG dimensions match header
+    if color.shape[:2] != (rgb_height, rgb_width):
+        return None
+
     # Create intrinsics at RGB resolution
     intrinsics = Intrinsics.from_matrix(intrinsics_array, rgb_width, rgb_height)
 
@@ -208,10 +232,13 @@ def get_packet_size(data: bytes) -> Optional[int]:
         data: At least HEADER_SIZE_V1 bytes
 
     Returns:
-        Total packet size or None if invalid.
+        Total packet size or None if invalid or sizes exceed bounds.
     """
     header = parse_header(data)
     if header is None:
+        return None
+
+    if not _sizes_valid(header):
         return None
 
     version = header["version"]
